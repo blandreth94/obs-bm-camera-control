@@ -113,7 +113,7 @@ sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
 ### Clone
 
 ```bash
-git clone https://github.com/yourusername/obs-bm-camera-control
+git clone https://github.com/blandreth94/obs-bm-camera-control
 cd obs-bm-camera-control
 ```
 
