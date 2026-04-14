@@ -11,8 +11,14 @@
 #include <QListWidget>
 #include <QCheckBox>
 #include <QTimer>
+#include <QGridLayout>
+#include <QGroupBox>
+#include <QResizeEvent>
 
 class CameraClient;
+
+// Width threshold (px) below which we collapse to a single column
+static constexpr int WIDE_THRESHOLD = 480;
 
 class CameraControlWidget : public QWidget {
 	Q_OBJECT
@@ -20,6 +26,9 @@ class CameraControlWidget : public QWidget {
 public:
 	explicit CameraControlWidget(QWidget *parent = nullptr);
 	~CameraControlWidget();
+
+protected:
+	void resizeEvent(QResizeEvent *event) override;
 
 private slots:
 	// Connection
@@ -49,11 +58,11 @@ private slots:
 
 private:
 	void buildUI();
+	void relayout(bool wide);
 	void setControlsEnabled(bool enabled);
 	void saveHostname(const QString &hostname);
 	QString loadHostname() const;
 
-	// Helper: set a QSpinBox value only when not focused
 	template<typename SpinT, typename ValT>
 	void safeSet(SpinT *spin, ValT value)
 	{
@@ -88,6 +97,16 @@ private:
 	// Presets
 	QListWidget *m_presetList;
 
+	// Group boxes kept as members so relayout() can reposition them
+	QGroupBox *m_exposureGroup;
+	QGroupBox *m_wbGroup;
+	QGroupBox *m_colorGroup;
+	QGroupBox *m_presetsGroup;
+
+	// The grid that holds the four groups — resized dynamically
+	QGridLayout *m_groupGrid;
+
 	CameraClient *m_client;
 	QTimer *m_pollTimer;
+	bool m_wideMode = false;
 };
