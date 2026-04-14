@@ -74,6 +74,22 @@ void CameraClient::get(const QString &endpoint,
 		});
 }
 
+// Silent GET for polling — ignores errors rather than emitting connectFailed
+void CameraClient::silentGet(const QString &endpoint,
+			     std::function<void(const QByteArray &)> callback)
+{
+	if (!m_connected)
+		return;
+	QNetworkRequest req(QUrl(baseUrl() + endpoint));
+	QNetworkReply *reply = m_nam->get(req);
+	connect(reply, &QNetworkReply::finished, reply,
+		[reply, callback = std::move(callback)]() {
+			if (reply->error() == QNetworkReply::NoError)
+				callback(reply->readAll());
+			reply->deleteLater();
+		});
+}
+
 // ── exposure ─────────────────────────────────────────────────────────────────
 
 void CameraClient::setShutterSpeed(int denominator)
@@ -159,6 +175,65 @@ void CameraClient::setColor(double hueDegrees, double saturation)
 	putJson("/colorCorrection/color", QJsonDocument(obj).toJson(QJsonDocument::Compact));
 }
 
+// ── poll ──────────────────────────────────────────────────────────────────────
+
+void CameraClient::poll()
+{
+	// Shutter — camera reports either shutterSpeed or shutterAngle, not both
+	silentGet("/video/shutter", [this](const QByteArray &data) {
+		QJsonObject obj = QJsonDocument::fromJson(data).object();
+		if (obj.contains("shutterAngle"))
+			emit shutterReceived(obj["shutterAngle"].toInt(), true);
+		else if (obj.contains("shutterSpeed"))
+			emit shutterReceived(obj["shutterSpeed"].toInt(), false);
+	});
+
+	silentGet("/video/iso", [this](const QByteArray &data) {
+		QJsonObject obj = QJsonDocument::fromJson(data).object();
+		if (obj.contains("iso"))
+			emit isoReceived(obj["iso"].toInt());
+	});
+
+	silentGet("/video/gain", [this](const QByteArray &data) {
+		QJsonObject obj = QJsonDocument::fromJson(data).object();
+		if (obj.contains("gain"))
+			emit gainReceived(obj["gain"].toInt());
+	});
+
+	silentGet("/video/ndFilter", [this](const QByteArray &data) {
+		QJsonObject obj = QJsonDocument::fromJson(data).object();
+		if (obj.contains("stop"))
+			emit ndReceived(obj["stop"].toInt());
+	});
+
+	silentGet("/video/whiteBalance", [this](const QByteArray &data) {
+		QJsonObject obj = QJsonDocument::fromJson(data).object();
+		if (obj.contains("whiteBalance"))
+			emit wbReceived(obj["whiteBalance"].toInt());
+	});
+
+	silentGet("/video/whiteBalanceTint", [this](const QByteArray &data) {
+		QJsonObject obj = QJsonDocument::fromJson(data).object();
+		if (obj.contains("whiteBalanceTint"))
+			emit tintReceived(obj["whiteBalanceTint"].toInt());
+	});
+
+	silentGet("/colorCorrection/contrast", [this](const QByteArray &data) {
+		QJsonObject obj = QJsonDocument::fromJson(data).object();
+		if (obj.contains("pivot") && obj.contains("adjust"))
+			emit contrastReceived(obj["pivot"].toDouble(),
+					      obj["adjust"].toDouble());
+	});
+
+	silentGet("/colorCorrection/color", [this](const QByteArray &data) {
+		QJsonObject obj = QJsonDocument::fromJson(data).object();
+		if (obj.contains("hue") && obj.contains("saturation"))
+			// Convert hue from -1..+1 back to degrees
+			emit colorReceived(obj["hue"].toDouble() * 180.0,
+					   obj["saturation"].toDouble());
+	});
+}
+
 // ── presets ───────────────────────────────────────────────────────────────────
 
 void CameraClient::fetchPresets()
@@ -167,7 +242,7 @@ void CameraClient::fetchPresets()
 		QJsonDocument doc = QJsonDocument::fromJson(data);
 		QJsonArray arr = doc.object()["presets"].toArray();
 		QStringList list;
-		for (const QJsonValue &v : arr)
+		for (const QJsonValue v : arr)
 			list << v.toString();
 		emit presetsReceived(list);
 	});

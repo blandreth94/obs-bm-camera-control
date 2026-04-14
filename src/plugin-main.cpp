@@ -20,8 +20,6 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <obs-frontend-api.h>
 #include <plugin-support.h>
 
-#include <QMainWindow>
-
 #include "camera-dock.h"
 
 OBS_DECLARE_MODULE()
@@ -31,10 +29,8 @@ bool obs_module_load(void)
 {
 	obs_log(LOG_INFO, "Blackmagic Camera Control loaded (version %s)", PLUGIN_VERSION);
 
-	auto *main_window = static_cast<QMainWindow *>(obs_frontend_get_main_window());
-	auto *dock = new CameraDockWidget(main_window);
-
-	obs_frontend_add_dock(dock);
+	auto *widget = new CameraControlWidget();
+	obs_frontend_add_dock_by_id("bm-camera-control-dock", "BM Camera Control", widget);
 
 	return true;
 }

@@ -35,6 +35,26 @@
       }
     },
     {
+      "name": "macos-ninja",
+      "displayName": "macOS arm64 (Ninja, no Xcode required)",
+      "description": "Build for macOS arm64 using Ninja — works with Command Line Tools only",
+      "inherits": ["template"],
+      "binaryDir": "${sourceDir}/build_macos_ninja",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      },
+      "generator": "Ninja",
+      "warnings": {"dev": true, "deprecated": true},
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_OSX_DEPLOYMENT_TARGET": "12.0",
+        "CMAKE_C_COMPILER": "/usr/bin/clang",
+        "CMAKE_CXX_COMPILER": "/usr/bin/clang++"
+      }
+    },
+    {
       "name": "macos-ci",
       "inherits": ["macos"],
       "displayName": "macOS Universal CI build",
@@ -106,6 +126,12 @@
       "displayName": "macOS Universal",
       "description": "macOS build for Universal architectures",
       "configuration": "RelWithDebInfo"
+    },
+    {
+      "name": "macos-ninja",
+      "configurePreset": "macos-ninja",
+      "displayName": "macOS arm64 (Ninja)",
+      "description": "macOS build using Ninja"
     },
     {
       "name": "macos-ci",

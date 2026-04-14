@@ -44,4 +44,14 @@ target_sources(
 
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
+# AGL was removed from macOS 15+ SDKs; Qt6's prebuilt prl files still reference it.
+# Provide a stub empty framework so the linker is satisfied — AGL is never used at runtime.
+if(APPLE)
+  set(STUB_FW_DIR "${CMAKE_CURRENT_SOURCE_DIR}/stub-frameworks")
+  target_link_options(${CMAKE_PROJECT_NAME} PRIVATE
+    -F${STUB_FW_DIR}
+    -Wl,-undefined,dynamic_lookup
+  )
+endif()
+
 set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})

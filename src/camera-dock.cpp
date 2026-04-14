@@ -1,39 +1,57 @@
 #include "camera-dock.h"
 #include "camera-client.h"
 
-#include <QWidget>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
+#include <QGridLayout>
 #include <QGroupBox>
 #include <QFormLayout>
 #include <QScrollArea>
 #include <QSettings>
 #include <QLabel>
 #include <QPushButton>
+#include <QSizePolicy>
 
 static const char *SETTINGS_ORG = "obs-bm-camera-control";
 static const char *SETTINGS_APP = "camera";
+static const int POLL_INTERVAL_MS = 2000;
 
-CameraDockWidget::CameraDockWidget(QWidget *parent) : QDockWidget("BM Camera Control", parent)
+CameraControlWidget::CameraControlWidget(QWidget *parent) : QWidget(parent)
 {
 	m_client = new CameraClient(this);
-	connect(m_client, &CameraClient::connected, this, &CameraDockWidget::onConnected);
-	connect(m_client, &CameraClient::connectFailed, this, &CameraDockWidget::onConnectFailed);
-	connect(m_client, &CameraClient::disconnected, this, &CameraDockWidget::onDisconnected);
+	connect(m_client, &CameraClient::connected, this, &CameraControlWidget::onConnected);
+	connect(m_client, &CameraClient::connectFailed, this,
+		&CameraControlWidget::onConnectFailed);
+	connect(m_client, &CameraClient::disconnected, this, &CameraControlWidget::onDisconnected);
 	connect(m_client, &CameraClient::presetsReceived, this,
-		&CameraDockWidget::onPresetsReceived);
+		&CameraControlWidget::onPresetsReceived);
 
-	setObjectName("BMCameraControlDock");
-	setMinimumWidth(280);
+	// Poll signals → UI update slots
+	connect(m_client, &CameraClient::shutterReceived, this,
+		&CameraControlWidget::onShutterReceived);
+	connect(m_client, &CameraClient::isoReceived, this, &CameraControlWidget::onISOReceived);
+	connect(m_client, &CameraClient::gainReceived, this, &CameraControlWidget::onGainReceived);
+	connect(m_client, &CameraClient::ndReceived, this, &CameraControlWidget::onNDReceived);
+	connect(m_client, &CameraClient::wbReceived, this, &CameraControlWidget::onWBReceived);
+	connect(m_client, &CameraClient::tintReceived, this, &CameraControlWidget::onTintReceived);
+	connect(m_client, &CameraClient::contrastReceived, this,
+		&CameraControlWidget::onContrastReceived);
+	connect(m_client, &CameraClient::colorReceived, this,
+		&CameraControlWidget::onColorReceived);
+
+	m_pollTimer = new QTimer(this);
+	m_pollTimer->setInterval(POLL_INTERVAL_MS);
+	connect(m_pollTimer, &QTimer::timeout, m_client, &CameraClient::poll);
+
 	buildUI();
 	setControlsEnabled(false);
 }
 
-CameraDockWidget::~CameraDockWidget() {}
+CameraControlWidget::~CameraControlWidget() {}
 
 // ── UI construction ───────────────────────────────────────────────────────────
 
-void CameraDockWidget::buildUI()
+void CameraControlWidget::buildUI()
 {
 	QScrollArea *scroll = new QScrollArea(this);
 	scroll->setWidgetResizable(true);
@@ -44,259 +62,314 @@ void CameraDockWidget::buildUI()
 	root->setSpacing(6);
 	root->setContentsMargins(6, 6, 6, 6);
 
-	// ── Connection ────────────────────────────────────────────────────────
+	// ── Connection (full width) ───────────────────────────────────────────
 	{
 		QGroupBox *grp = new QGroupBox("Camera", content);
-		QVBoxLayout *vl = new QVBoxLayout(grp);
+		QGridLayout *gl = new QGridLayout(grp);
+		gl->setSpacing(4);
 
-		QHBoxLayout *hl = new QHBoxLayout;
 		m_hostnameEdit = new QLineEdit;
-		m_hostnameEdit->setPlaceholderText("hostname or IP");
+		m_hostnameEdit->setPlaceholderText("hostname or IP  (e.g. camera.local)");
 		m_hostnameEdit->setText(loadHostname());
 		m_connectBtn = new QPushButton("Connect");
-		hl->addWidget(m_hostnameEdit);
-		hl->addWidget(m_connectBtn);
-		vl->addLayout(hl);
-
+		m_connectBtn->setFixedWidth(90);
 		m_statusLabel = new QLabel("Not connected");
-		m_statusLabel->setStyleSheet("color: gray;");
-		vl->addWidget(m_statusLabel);
+		m_statusLabel->setStyleSheet("color: gray; font-size: 11px;");
+
+		gl->addWidget(m_hostnameEdit, 0, 0);
+		gl->addWidget(m_connectBtn, 0, 1);
+		gl->addWidget(m_statusLabel, 1, 0, 1, 2);
 
 		root->addWidget(grp);
-
 		connect(m_connectBtn, &QPushButton::clicked, this,
-			&CameraDockWidget::onConnectClicked);
+			&CameraControlWidget::onConnectClicked);
 	}
 
-	// ── Exposure ─────────────────────────────────────────────────────────
+	// ── Two-column row: Exposure | White Balance ──────────────────────────
 	{
-		QGroupBox *grp = new QGroupBox("Exposure", content);
-		QFormLayout *fl = new QFormLayout(grp);
+		QHBoxLayout *cols = new QHBoxLayout;
+		cols->setSpacing(6);
 
-		// Shutter
-		QWidget *shutterRow = new QWidget;
-		QHBoxLayout *shutterHl = new QHBoxLayout(shutterRow);
-		shutterHl->setContentsMargins(0, 0, 0, 0);
-		m_shutterSpin = new QSpinBox;
-		m_shutterSpin->setRange(1, 16000);
-		m_shutterSpin->setValue(50);
-		m_shutterAngleMode = new QCheckBox("Angle");
-		m_shutterAngleMode->setToolTip("When checked, value is shutter angle ×100 (e.g. 18000 = 180°).\nWhen unchecked, value is 1/N shutter speed.");
-		shutterHl->addWidget(m_shutterSpin);
-		shutterHl->addWidget(m_shutterAngleMode);
-		fl->addRow("Shutter", shutterRow);
+		// ── Exposure ─────────────────────────────────────────────────
+		{
+			QGroupBox *grp = new QGroupBox("Exposure", content);
+			grp->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+			QGridLayout *gl = new QGridLayout(grp);
+			gl->setSpacing(4);
+			gl->setColumnStretch(1, 1);
 
-		connect(m_shutterSpin, &QSpinBox::editingFinished, this, [this]() {
-			if (m_shutterAngleMode->isChecked())
-				m_client->setShutterAngle(m_shutterSpin->value());
-			else
-				m_client->setShutterSpeed(m_shutterSpin->value());
-		});
+			int row = 0;
 
-		// ISO
-		m_isoSpin = new QSpinBox;
-		m_isoSpin->setRange(100, 25600);
-		m_isoSpin->setSingleStep(100);
-		m_isoSpin->setValue(400);
-		fl->addRow("ISO", m_isoSpin);
-		connect(m_isoSpin, &QSpinBox::editingFinished, this,
-			[this]() { m_client->setISO(m_isoSpin->value()); });
+			// Shutter
+			m_shutterSpin = new QSpinBox;
+			m_shutterSpin->setRange(1, 36000);
+			m_shutterSpin->setValue(50);
+			m_shutterAngleMode = new QCheckBox("°");
+			m_shutterAngleMode->setToolTip(
+				"Unchecked: 1/N shutter speed\nChecked: angle ×100 (18000 = 180°)");
+			QHBoxLayout *shutterHL = new QHBoxLayout;
+			shutterHL->setSpacing(2);
+			shutterHL->addWidget(m_shutterSpin, 1);
+			shutterHL->addWidget(m_shutterAngleMode);
+			gl->addWidget(new QLabel("Shutter"), row, 0);
+			QWidget *shutterW = new QWidget;
+			shutterW->setLayout(shutterHL);
+			gl->addWidget(shutterW, row++, 1);
 
-		// Gain
-		m_gainSpin = new QSpinBox;
-		m_gainSpin->setRange(-12, 36);
-		m_gainSpin->setSingleStep(2);
-		m_gainSpin->setValue(0);
-		m_gainSpin->setSuffix(" dB");
-		fl->addRow("Gain", m_gainSpin);
-		connect(m_gainSpin, &QSpinBox::editingFinished, this,
-			[this]() { m_client->setGain(m_gainSpin->value()); });
-
-		// ND
-		m_ndSpin = new QSpinBox;
-		m_ndSpin->setRange(0, 12);
-		m_ndSpin->setSingleStep(2);
-		m_ndSpin->setValue(0);
-		m_ndSpin->setPrefix("ND");
-		fl->addRow("ND Filter", m_ndSpin);
-		connect(m_ndSpin, &QSpinBox::editingFinished, this,
-			[this]() { m_client->setNDStop(m_ndSpin->value()); });
-
-		// Auto Exposure
-		m_autoExposureCombo = new QComboBox;
-		m_autoExposureCombo->addItem("Off", QStringList{"Off", ""});
-		m_autoExposureCombo->addItem("Iris (continuous)",
-					     QStringList{"Continuous", "Iris"});
-		m_autoExposureCombo->addItem("Shutter (continuous)",
-					     QStringList{"Continuous", "Shutter"});
-		m_autoExposureCombo->addItem("Iris+Shutter (continuous)",
-					     QStringList{"Continuous", "Iris,Shutter"});
-		m_autoExposureCombo->addItem("One-shot Iris", QStringList{"OneShot", "Iris"});
-		fl->addRow("Auto Exp.", m_autoExposureCombo);
-		connect(m_autoExposureCombo, &QComboBox::currentIndexChanged, this,
-			[this](int idx) {
-				QStringList pair =
-					m_autoExposureCombo->itemData(idx).toStringList();
-				m_client->setAutoExposure(pair[0], pair[1]);
+			connect(m_shutterSpin, &QSpinBox::editingFinished, this, [this]() {
+				if (m_shutterAngleMode->isChecked())
+					m_client->setShutterAngle(m_shutterSpin->value());
+				else
+					m_client->setShutterSpeed(m_shutterSpin->value());
 			});
 
-		root->addWidget(grp);
-	}
+			// ISO
+			m_isoSpin = new QSpinBox;
+			m_isoSpin->setRange(100, 25600);
+			m_isoSpin->setSingleStep(100);
+			m_isoSpin->setValue(400);
+			gl->addWidget(new QLabel("ISO"), row, 0);
+			gl->addWidget(m_isoSpin, row++, 1);
+			connect(m_isoSpin, &QSpinBox::editingFinished, this,
+				[this]() { m_client->setISO(m_isoSpin->value()); });
 
-	// ── White Balance ─────────────────────────────────────────────────────
-	{
-		QGroupBox *grp = new QGroupBox("White Balance", content);
-		QVBoxLayout *vl = new QVBoxLayout(grp);
-		QFormLayout *fl = new QFormLayout;
+			// Gain
+			m_gainSpin = new QSpinBox;
+			m_gainSpin->setRange(-12, 36);
+			m_gainSpin->setSingleStep(2);
+			m_gainSpin->setValue(0);
+			m_gainSpin->setSuffix(" dB");
+			gl->addWidget(new QLabel("Gain"), row, 0);
+			gl->addWidget(m_gainSpin, row++, 1);
+			connect(m_gainSpin, &QSpinBox::editingFinished, this,
+				[this]() { m_client->setGain(m_gainSpin->value()); });
 
-		// Kelvin slider + spinbox (linked)
-		QHBoxLayout *khl = new QHBoxLayout;
-		m_wbSlider = new QSlider(Qt::Horizontal);
-		m_wbSlider->setRange(2000, 8000);
-		m_wbSlider->setSingleStep(100);
-		m_wbSlider->setValue(5600);
-		m_wbSpin = new QSpinBox;
-		m_wbSpin->setRange(2000, 8000);
-		m_wbSpin->setSingleStep(100);
-		m_wbSpin->setValue(5600);
-		m_wbSpin->setSuffix(" K");
-		khl->addWidget(m_wbSlider);
-		khl->addWidget(m_wbSpin);
-		fl->addRow("Kelvin", khl);
+			// ND
+			m_ndSpin = new QSpinBox;
+			m_ndSpin->setRange(0, 12);
+			m_ndSpin->setSingleStep(2);
+			m_ndSpin->setValue(0);
+			m_ndSpin->setPrefix("ND");
+			gl->addWidget(new QLabel("ND Filter"), row, 0);
+			gl->addWidget(m_ndSpin, row++, 1);
+			connect(m_ndSpin, &QSpinBox::editingFinished, this,
+				[this]() { m_client->setNDStop(m_ndSpin->value()); });
 
-		// Keep slider and spinbox in sync
-		connect(m_wbSlider, &QSlider::valueChanged, m_wbSpin, &QSpinBox::setValue);
-		connect(m_wbSpin, &QSpinBox::valueChanged, m_wbSlider, &QSlider::setValue);
-		connect(m_wbSlider, &QSlider::sliderReleased, this,
-			[this]() { m_client->setWhiteBalance(m_wbSpin->value()); });
-		connect(m_wbSpin, &QSpinBox::editingFinished, this,
-			[this]() { m_client->setWhiteBalance(m_wbSpin->value()); });
+			// Auto Exposure
+			m_autoExposureCombo = new QComboBox;
+			m_autoExposureCombo->addItem("Off", QStringList{"Off", ""});
+			m_autoExposureCombo->addItem("Iris", QStringList{"Continuous", "Iris"});
+			m_autoExposureCombo->addItem("Shutter",
+						     QStringList{"Continuous", "Shutter"});
+			m_autoExposureCombo->addItem("Iris+Shut",
+						     QStringList{"Continuous", "Iris,Shutter"});
+			m_autoExposureCombo->addItem("1-shot Iris",
+						     QStringList{"OneShot", "Iris"});
+			gl->addWidget(new QLabel("Auto"), row, 0);
+			gl->addWidget(m_autoExposureCombo, row++, 1);
+			connect(m_autoExposureCombo, &QComboBox::currentIndexChanged, this,
+				[this](int idx) {
+					QStringList pair =
+						m_autoExposureCombo->itemData(idx).toStringList();
+					m_client->setAutoExposure(pair[0], pair[1]);
+				});
 
-		// Tint
-		m_tintSpin = new QSpinBox;
-		m_tintSpin->setRange(-100, 100);
-		m_tintSpin->setValue(0);
-		fl->addRow("Tint", m_tintSpin);
-		connect(m_tintSpin, &QSpinBox::editingFinished, this,
-			[this]() { m_client->setWhiteBalanceTint(m_tintSpin->value()); });
-
-		vl->addLayout(fl);
-
-		// Auto WB button
-		QPushButton *autoWBBtn = new QPushButton("Auto White Balance");
-		connect(autoWBBtn, &QPushButton::clicked, this,
-			&CameraDockWidget::onAutoWBClicked);
-		vl->addWidget(autoWBBtn);
-
-		// WB Presets
-		QHBoxLayout *presetRow = new QHBoxLayout;
-		struct WBPreset {
-			const char *label;
-			int kelvin;
-			int tint;
-		};
-		static const WBPreset wbPresets[] = {{"Sun", 5600, 10},
-						     {"Tungsten", 3200, 0},
-						     {"Fluor.", 4000, 15},
-						     {"Shade", 4500, 15},
-						     {"Cloud", 6500, 10}};
-		for (const auto &p : wbPresets) {
-			QPushButton *btn = new QPushButton(p.label);
-			btn->setToolTip(QString("%1 K").arg(p.kelvin));
-			int k = p.kelvin;
-			int t = p.tint;
-			connect(btn, &QPushButton::clicked, this,
-				[this, k, t]() { onWBPresetClicked(k, t); });
-			presetRow->addWidget(btn);
+			cols->addWidget(grp);
 		}
-		vl->addLayout(presetRow);
 
-		root->addWidget(grp);
+		// ── White Balance ─────────────────────────────────────────────
+		{
+			QGroupBox *grp = new QGroupBox("White Balance", content);
+			grp->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+			QVBoxLayout *vl = new QVBoxLayout(grp);
+			vl->setSpacing(4);
+
+			// Kelvin slider (full width)
+			m_wbSlider = new QSlider(Qt::Horizontal);
+			m_wbSlider->setRange(2000, 8000);
+			m_wbSlider->setSingleStep(100);
+			m_wbSlider->setValue(5600);
+			vl->addWidget(m_wbSlider);
+
+			// Kelvin + Tint in a compact grid
+			QGridLayout *gl = new QGridLayout;
+			gl->setSpacing(4);
+			gl->setColumnStretch(1, 1);
+
+			m_wbSpin = new QSpinBox;
+			m_wbSpin->setRange(2000, 8000);
+			m_wbSpin->setSingleStep(100);
+			m_wbSpin->setValue(5600);
+			m_wbSpin->setSuffix(" K");
+			gl->addWidget(new QLabel("Kelvin"), 0, 0);
+			gl->addWidget(m_wbSpin, 0, 1);
+
+			m_tintSpin = new QSpinBox;
+			m_tintSpin->setRange(-100, 100);
+			m_tintSpin->setValue(0);
+			gl->addWidget(new QLabel("Tint"), 1, 0);
+			gl->addWidget(m_tintSpin, 1, 1);
+			vl->addLayout(gl);
+
+			// Sync slider ↔ spinbox
+			connect(m_wbSlider, &QSlider::valueChanged, m_wbSpin,
+				&QSpinBox::setValue);
+			connect(m_wbSpin, &QSpinBox::valueChanged, m_wbSlider,
+				&QSlider::setValue);
+			connect(m_wbSlider, &QSlider::sliderReleased, this,
+				[this]() { m_client->setWhiteBalance(m_wbSpin->value()); });
+			connect(m_wbSpin, &QSpinBox::editingFinished, this,
+				[this]() { m_client->setWhiteBalance(m_wbSpin->value()); });
+			connect(m_tintSpin, &QSpinBox::editingFinished, this, [this]() {
+				m_client->setWhiteBalanceTint(m_tintSpin->value());
+			});
+
+			// Auto WB
+			QPushButton *autoWBBtn = new QPushButton("Auto WB");
+			connect(autoWBBtn, &QPushButton::clicked, this,
+				&CameraControlWidget::onAutoWBClicked);
+			vl->addWidget(autoWBBtn);
+
+			// WB Preset buttons (2×3 mini grid)
+			struct WBPreset {
+				const char *label;
+				int kelvin;
+				int tint;
+			};
+			static const WBPreset wbPresets[] = {{"Sun", 5600, 10},
+							     {"Tungsten", 3200, 0},
+							     {"Fluor.", 4000, 15},
+							     {"Shade", 4500, 15},
+							     {"Cloud", 6500, 10}};
+			QGridLayout *pg = new QGridLayout;
+			pg->setSpacing(3);
+			for (int i = 0; i < 5; ++i) {
+				const auto &p = wbPresets[i];
+				QPushButton *btn = new QPushButton(p.label);
+				btn->setToolTip(QString("%1 K").arg(p.kelvin));
+				btn->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+				int k = p.kelvin, t = p.tint;
+				connect(btn, &QPushButton::clicked, this,
+					[this, k, t]() { onWBPresetClicked(k, t); });
+				pg->addWidget(btn, i / 3, i % 3);
+			}
+			vl->addLayout(pg);
+
+			cols->addWidget(grp);
+		}
+
+		root->addLayout(cols);
 	}
 
-	// ── Color / Contrast ─────────────────────────────────────────────────
+	// ── Two-column row: Color/Contrast | Presets ──────────────────────────
 	{
-		QGroupBox *grp = new QGroupBox("Color / Contrast", content);
-		QFormLayout *fl = new QFormLayout(grp);
+		QHBoxLayout *cols = new QHBoxLayout;
+		cols->setSpacing(6);
 
-		m_contrastAdjust = new QDoubleSpinBox;
-		m_contrastAdjust->setRange(0.0, 2.0);
-		m_contrastAdjust->setSingleStep(0.05);
-		m_contrastAdjust->setValue(1.0);
-		m_contrastAdjust->setToolTip("1.0 = no change");
-		fl->addRow("Contrast", m_contrastAdjust);
+		// ── Color / Contrast ──────────────────────────────────────────
+		{
+			QGroupBox *grp = new QGroupBox("Color / Contrast", content);
+			grp->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+			QGridLayout *gl = new QGridLayout(grp);
+			gl->setSpacing(4);
+			gl->setColumnStretch(1, 1);
 
-		m_contrastPivot = new QDoubleSpinBox;
-		m_contrastPivot->setRange(0.0, 1.0);
-		m_contrastPivot->setSingleStep(0.05);
-		m_contrastPivot->setValue(0.5);
-		fl->addRow("Pivot", m_contrastPivot);
+			int row = 0;
 
-		connect(m_contrastAdjust, &QDoubleSpinBox::editingFinished, this, [this]() {
-			m_client->setContrast(m_contrastPivot->value(),
-					      m_contrastAdjust->value());
-		});
-		connect(m_contrastPivot, &QDoubleSpinBox::editingFinished, this, [this]() {
-			m_client->setContrast(m_contrastPivot->value(),
-					      m_contrastAdjust->value());
-		});
+			m_contrastAdjust = new QDoubleSpinBox;
+			m_contrastAdjust->setRange(0.0, 2.0);
+			m_contrastAdjust->setSingleStep(0.05);
+			m_contrastAdjust->setValue(1.0);
+			m_contrastAdjust->setToolTip("1.0 = no change");
+			gl->addWidget(new QLabel("Contrast"), row, 0);
+			gl->addWidget(m_contrastAdjust, row++, 1);
 
-		m_hueSpin = new QSpinBox;
-		m_hueSpin->setRange(-180, 180);
-		m_hueSpin->setValue(0);
-		m_hueSpin->setSuffix("°");
-		fl->addRow("Hue", m_hueSpin);
+			m_contrastPivot = new QDoubleSpinBox;
+			m_contrastPivot->setRange(0.0, 1.0);
+			m_contrastPivot->setSingleStep(0.05);
+			m_contrastPivot->setValue(0.5);
+			gl->addWidget(new QLabel("Pivot"), row, 0);
+			gl->addWidget(m_contrastPivot, row++, 1);
 
-		m_satSpin = new QSpinBox;
-		m_satSpin->setRange(0, 200);
-		m_satSpin->setValue(100);
-		m_satSpin->setSuffix("%");
-		fl->addRow("Saturation", m_satSpin);
+			connect(m_contrastAdjust, &QDoubleSpinBox::editingFinished, this,
+				[this]() {
+					m_client->setContrast(m_contrastPivot->value(),
+							      m_contrastAdjust->value());
+				});
+			connect(m_contrastPivot, &QDoubleSpinBox::editingFinished, this,
+				[this]() {
+					m_client->setContrast(m_contrastPivot->value(),
+							      m_contrastAdjust->value());
+				});
 
-		connect(m_hueSpin, &QSpinBox::editingFinished, this, [this]() {
-			m_client->setColor(m_hueSpin->value(), m_satSpin->value() / 100.0);
-		});
-		connect(m_satSpin, &QSpinBox::editingFinished, this, [this]() {
-			m_client->setColor(m_hueSpin->value(), m_satSpin->value() / 100.0);
-		});
+			m_hueSpin = new QSpinBox;
+			m_hueSpin->setRange(-180, 180);
+			m_hueSpin->setValue(0);
+			m_hueSpin->setSuffix("°");
+			gl->addWidget(new QLabel("Hue"), row, 0);
+			gl->addWidget(m_hueSpin, row++, 1);
 
-		root->addWidget(grp);
-	}
+			m_satSpin = new QSpinBox;
+			m_satSpin->setRange(0, 200);
+			m_satSpin->setValue(100);
+			m_satSpin->setSuffix("%");
+			gl->addWidget(new QLabel("Saturation"), row, 0);
+			gl->addWidget(m_satSpin, row++, 1);
 
-	// ── Presets ───────────────────────────────────────────────────────────
-	{
-		QGroupBox *grp = new QGroupBox("Presets", content);
-		QVBoxLayout *vl = new QVBoxLayout(grp);
+			connect(m_hueSpin, &QSpinBox::editingFinished, this, [this]() {
+				m_client->setColor(m_hueSpin->value(),
+						   m_satSpin->value() / 100.0);
+			});
+			connect(m_satSpin, &QSpinBox::editingFinished, this, [this]() {
+				m_client->setColor(m_hueSpin->value(),
+						   m_satSpin->value() / 100.0);
+			});
 
-		m_presetList = new QListWidget;
-		m_presetList->setMaximumHeight(120);
-		vl->addWidget(m_presetList);
+			cols->addWidget(grp);
+		}
 
-		QHBoxLayout *btnRow = new QHBoxLayout;
-		QPushButton *applyBtn = new QPushButton("Apply");
-		QPushButton *refreshBtn = new QPushButton("Refresh");
-		btnRow->addWidget(applyBtn);
-		btnRow->addWidget(refreshBtn);
-		vl->addLayout(btnRow);
+		// ── Presets ───────────────────────────────────────────────────
+		{
+			QGroupBox *grp = new QGroupBox("Presets", content);
+			grp->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+			QVBoxLayout *vl = new QVBoxLayout(grp);
+			vl->setSpacing(4);
 
-		connect(applyBtn, &QPushButton::clicked, this,
-			&CameraDockWidget::onApplyPresetClicked);
-		connect(refreshBtn, &QPushButton::clicked, this,
-			&CameraDockWidget::onRefreshPresetsClicked);
+			m_presetList = new QListWidget;
+			vl->addWidget(m_presetList);
 
-		root->addWidget(grp);
+			QHBoxLayout *btnRow = new QHBoxLayout;
+			QPushButton *applyBtn = new QPushButton("Apply");
+			QPushButton *refreshBtn = new QPushButton("Refresh");
+			btnRow->addWidget(applyBtn);
+			btnRow->addWidget(refreshBtn);
+			vl->addLayout(btnRow);
+
+			connect(applyBtn, &QPushButton::clicked, this,
+				&CameraControlWidget::onApplyPresetClicked);
+			connect(refreshBtn, &QPushButton::clicked, this,
+				&CameraControlWidget::onRefreshPresetsClicked);
+
+			cols->addWidget(grp);
+		}
+
+		root->addLayout(cols);
 	}
 
 	root->addStretch();
 	scroll->setWidget(content);
-	setWidget(scroll);
+
+	QVBoxLayout *outerLayout = new QVBoxLayout(this);
+	outerLayout->setContentsMargins(0, 0, 0, 0);
+	outerLayout->addWidget(scroll);
 }
 
-// ── slots ────────────────────────────────────────────────────────────────────
+// ── connection slots ──────────────────────────────────────────────────────────
 
-void CameraDockWidget::onConnectClicked()
+void CameraControlWidget::onConnectClicked()
 {
 	if (m_client->isConnected()) {
+		m_pollTimer->stop();
 		m_client->disconnectFromCamera();
 	} else {
 		QString host = m_hostnameEdit->text().trimmed();
@@ -304,60 +377,64 @@ void CameraDockWidget::onConnectClicked()
 			return;
 		saveHostname(host);
 		m_statusLabel->setText("Connecting…");
-		m_statusLabel->setStyleSheet("color: orange;");
+		m_statusLabel->setStyleSheet("color: orange; font-size: 11px;");
 		m_connectBtn->setEnabled(false);
 		m_client->connectToCamera(host);
 	}
 }
 
-void CameraDockWidget::onConnected()
+void CameraControlWidget::onConnected()
 {
-	m_statusLabel->setText(QString("Connected: %1").arg(m_client->hostname()));
-	m_statusLabel->setStyleSheet("color: green;");
+	m_statusLabel->setText(QString("● %1").arg(m_client->hostname()));
+	m_statusLabel->setStyleSheet("color: #4c4; font-size: 11px;");
 	m_connectBtn->setText("Disconnect");
 	m_connectBtn->setEnabled(true);
 	setControlsEnabled(true);
 	m_client->fetchPresets();
+	m_client->poll(); // immediate first read
+	m_pollTimer->start();
 }
 
-void CameraDockWidget::onConnectFailed(const QString &reason)
+void CameraControlWidget::onConnectFailed(const QString &reason)
 {
-	m_statusLabel->setText(QString("Failed: %1").arg(reason));
-	m_statusLabel->setStyleSheet("color: red;");
+	m_statusLabel->setText(QString("✕ %1").arg(reason));
+	m_statusLabel->setStyleSheet("color: #c44; font-size: 11px;");
 	m_connectBtn->setText("Connect");
 	m_connectBtn->setEnabled(true);
 	setControlsEnabled(false);
 }
 
-void CameraDockWidget::onDisconnected()
+void CameraControlWidget::onDisconnected()
 {
 	m_statusLabel->setText("Not connected");
-	m_statusLabel->setStyleSheet("color: gray;");
+	m_statusLabel->setStyleSheet("color: gray; font-size: 11px;");
 	m_connectBtn->setText("Connect");
 	setControlsEnabled(false);
 	m_presetList->clear();
 }
 
-void CameraDockWidget::onPresetsReceived(const QStringList &presets)
+// ── preset slots ──────────────────────────────────────────────────────────────
+
+void CameraControlWidget::onPresetsReceived(const QStringList &presets)
 {
 	m_presetList->clear();
 	for (const QString &p : presets)
 		m_presetList->addItem(p);
 }
 
-void CameraDockWidget::onApplyPresetClicked()
+void CameraControlWidget::onApplyPresetClicked()
 {
 	QListWidgetItem *item = m_presetList->currentItem();
 	if (item)
 		m_client->applyPreset(item->text());
 }
 
-void CameraDockWidget::onRefreshPresetsClicked()
+void CameraControlWidget::onRefreshPresetsClicked()
 {
 	m_client->fetchPresets();
 }
 
-void CameraDockWidget::onWBPresetClicked(int kelvin, int tint)
+void CameraControlWidget::onWBPresetClicked(int kelvin, int tint)
 {
 	m_wbSpin->setValue(kelvin);
 	m_tintSpin->setValue(tint);
@@ -365,14 +442,71 @@ void CameraDockWidget::onWBPresetClicked(int kelvin, int tint)
 	m_client->setWhiteBalanceTint(tint);
 }
 
-void CameraDockWidget::onAutoWBClicked()
+void CameraControlWidget::onAutoWBClicked()
 {
 	m_client->doAutoWhiteBalance();
 }
 
+// ── poll result slots ─────────────────────────────────────────────────────────
+
+void CameraControlWidget::onShutterReceived(int value, bool isAngle)
+{
+	// Update mode checkbox only if neither control is focused
+	if (!m_shutterAngleMode->hasFocus())
+		m_shutterAngleMode->setChecked(isAngle);
+	safeSet(m_shutterSpin, value);
+}
+
+void CameraControlWidget::onISOReceived(int iso)
+{
+	safeSet(m_isoSpin, iso);
+}
+
+void CameraControlWidget::onGainReceived(int db)
+{
+	safeSet(m_gainSpin, db);
+}
+
+void CameraControlWidget::onNDReceived(int stop)
+{
+	safeSet(m_ndSpin, stop);
+}
+
+void CameraControlWidget::onWBReceived(int kelvin)
+{
+	// Update both slider and spinbox; block signals to avoid double-fire
+	if (!m_wbSpin->hasFocus() && !m_wbSlider->hasFocus()) {
+		m_wbSlider->blockSignals(true);
+		m_wbSlider->setValue(kelvin);
+		m_wbSlider->blockSignals(false);
+		m_wbSpin->blockSignals(true);
+		m_wbSpin->setValue(kelvin);
+		m_wbSpin->blockSignals(false);
+	}
+}
+
+void CameraControlWidget::onTintReceived(int tint)
+{
+	safeSet(m_tintSpin, tint);
+}
+
+void CameraControlWidget::onContrastReceived(double pivot, double adjust)
+{
+	if (!m_contrastAdjust->hasFocus())
+		m_contrastAdjust->setValue(adjust);
+	if (!m_contrastPivot->hasFocus())
+		m_contrastPivot->setValue(pivot);
+}
+
+void CameraControlWidget::onColorReceived(double hueDegrees, double saturation)
+{
+	safeSet(m_hueSpin, static_cast<int>(hueDegrees));
+	safeSet(m_satSpin, static_cast<int>(saturation * 100.0));
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-void CameraDockWidget::setControlsEnabled(bool enabled)
+void CameraControlWidget::setControlsEnabled(bool enabled)
 {
 	m_shutterSpin->setEnabled(enabled);
 	m_shutterAngleMode->setEnabled(enabled);
@@ -390,13 +524,13 @@ void CameraDockWidget::setControlsEnabled(bool enabled)
 	m_presetList->setEnabled(enabled);
 }
 
-void CameraDockWidget::saveHostname(const QString &hostname)
+void CameraControlWidget::saveHostname(const QString &hostname)
 {
 	QSettings s(SETTINGS_ORG, SETTINGS_APP);
 	s.setValue("hostname", hostname);
 }
 
-QString CameraDockWidget::loadHostname() const
+QString CameraControlWidget::loadHostname() const
 {
 	QSettings s(SETTINGS_ORG, SETTINGS_APP);
 	return s.value("hostname", "").toString();
